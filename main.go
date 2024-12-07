@@ -157,15 +157,27 @@ func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, collection *mong
 		}
 
 	case "❓ Help":
-		helpText := "Here's how to use the bot:\n\n" +
-			"🎵 Search Lyrics - Search for song lyrics\n" +
-			"📝 View All Songs - Browse songs by letter\n" +
-			"⬆️ Upload Image - Upload song images (Admin only)\n" +
-			"➕ Add Song - Add new songs (Admin only)\n\n" +
-			"Commands:\n" +
-			"/lyrics <song title> - Get lyrics for a specific song\n" +
+		helpText := "Welcome to Maranatha Choir Lyrics Bot! 🎵\n\n" +
+			"📱 Main Features:\n" +
+			"🔍 Search Lyrics - Search for song lyrics by title\n" +
+			"📝 View All Songs - Browse all songs alphabetically\n" +
+			"👥 Choir Songs - View songs specific to choir\n" +
+			"🎵 Non-Choir Songs - View other spiritual songs\n" +
+			"🎲 Random Song - Get a random song from our collection\n\n" +
+			"👨‍💼 Admin Features:\n" +
+			"⬆️ Upload Image - Upload images for songs\n" +
+			"➕ Add Song - Add new songs to the database\n" +
+			"✏️ Edit Song - Modify existing songs\n\n" +
+			"🔍 Search Tips:\n" +
+			"• Use /lyrics <song title> to search directly\n" +
+			"• Browse songs alphabetically by clicking letters\n" +
+			"• Use the category buttons for filtered views\n\n" +
+			"📜 Commands:\n" +
 			"/start - Show main menu\n" +
-			"/help - Show this help message"
+			"/help - Show this help message\n" +
+			"/lyrics <title> - Get lyrics for a specific song\n" +
+			"/cancel - Cancel current operation\n\n" +
+			"For any issues or song requests, please contact the administrators."
 
 		msg := tgbotapi.NewMessage(update.Message.Chat.ID, helpText)
 		bot.Send(msg)
@@ -190,6 +202,9 @@ func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, collection *mong
 				"You are not authorized to edit songs.")
 			bot.Send(msg)
 		}
+
+	case "🎲 Random Song":
+		getRandomSong(bot, update.Message, collection)
 
 	default:
 		if isAdmin(update.Message.From.ID) {
@@ -241,13 +256,45 @@ func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, collection *mong
 					return
 
 				case "awaiting_image":
-					imageURL := update.Message.Text
-					title := state.Title
-					lyrics := state.Lyrics
+					var imageURL string
 
+					// Check if message contains a photo
+					if update.Message.Photo != nil {
+						// Get the highest resolution photo
+						photo := (*update.Message.Photo)[len(*update.Message.Photo)-1]
+						fileURL, err := bot.GetFileDirectURL(photo.FileID)
+						if err != nil {
+							msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Failed to process image.")
+							bot.Send(msg)
+							return
+						}
+
+						// Download and upload to Imgur
+						imagePath := "temp_image.jpg"
+						err = downloadFile(imagePath, fileURL)
+						if err != nil {
+							msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Failed to download image.")
+							bot.Send(msg)
+							return
+						}
+						defer os.Remove(imagePath)
+
+						imgurURL, err := uploadImageToImgur(imagePath)
+						if err != nil {
+							msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Failed to upload image to Imgur.")
+							bot.Send(msg)
+							return
+						}
+						imageURL = imgurURL
+					} else {
+						// Use the text as URL directly
+						imageURL = update.Message.Text
+					}
+
+					// Insert the song with the image URL
 					_, err := collection.InsertOne(context.TODO(), bson.M{
-						"title":    title,
-						"lyrics":   lyrics,
+						"title":    state.Title,
+						"lyrics":   state.Lyrics,
 						"image":    imageURL,
 						"category": state.Category,
 					})
@@ -260,6 +307,85 @@ func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, collection *mong
 						bot.Send(msg)
 					}
 					delete(userStates, update.Message.From.ID)
+					return
+
+				case "edit_select_song":
+					// Find the song first
+					var result bson.M
+					err := collection.FindOne(context.TODO(), bson.M{"title": update.Message.Text}).Decode(&result)
+					if err != nil {
+						msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Song not found. Please try again:")
+						bot.Send(msg)
+						return
+					}
+
+					// Store the title for later use
+					userStates[update.Message.From.ID] = UserState{
+						Stage:     "edit_select_field",
+						Title:     update.Message.Text,
+						IsEditing: true,
+					}
+
+					// Create keyboard for edit options
+					keyboard := tgbotapi.NewReplyKeyboard(
+						tgbotapi.NewKeyboardButtonRow(
+							tgbotapi.NewKeyboardButton("Edit Title"),
+							tgbotapi.NewKeyboardButton("Edit Lyrics"),
+						),
+						tgbotapi.NewKeyboardButtonRow(
+							tgbotapi.NewKeyboardButton("Edit Category"),
+							tgbotapi.NewKeyboardButton("Edit Image"),
+						),
+						tgbotapi.NewKeyboardButtonRow(
+							tgbotapi.NewKeyboardButton("Cancel"),
+						),
+					)
+
+					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "What would you like to edit?")
+					msg.ReplyMarkup = keyboard
+					bot.Send(msg)
+					return
+
+				case "edit_select_field":
+					switch update.Message.Text {
+					case "Edit Title", "Edit Lyrics", "Edit Category", "Edit Image":
+						userStates[update.Message.From.ID] = UserState{
+							Stage:     "edit_enter_value",
+							Title:     state.Title,
+							IsEditing: true,
+							EditField: strings.ToLower(strings.Split(update.Message.Text, " ")[1]),
+						}
+						msg := tgbotapi.NewMessage(update.Message.Chat.ID,
+							fmt.Sprintf("Please enter the new %s:",
+								strings.ToLower(strings.Split(update.Message.Text, " ")[1])))
+						msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
+						bot.Send(msg)
+						return
+					case "Cancel":
+						delete(userStates, update.Message.From.ID)
+						msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Edit cancelled.")
+						msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
+						bot.Send(msg)
+						sendMainMenu(bot, update.Message.Chat.ID)
+						return
+					}
+
+				case "edit_enter_value":
+					// Update the document in MongoDB
+					filter := bson.M{"title": state.Title}
+					updateDoc := bson.M{"$set": bson.M{state.EditField: update.Message.Text}}
+
+					_, err := collection.UpdateOne(context.TODO(), filter, updateDoc)
+					if err != nil {
+						msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Failed to update the song.")
+						bot.Send(msg)
+					} else {
+						msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Song updated successfully!")
+						bot.Send(msg)
+					}
+
+					delete(userStates, update.Message.From.ID)
+					sendMainMenu(bot, update.Message.Chat.ID)
 					return
 				}
 			}
@@ -551,9 +677,10 @@ func sendMainMenu(bot *tgbotapi.BotAPI, chatID int64) {
 		),
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("✏️ Edit Song"),
+			tgbotapi.NewKeyboardButton("🎲 Random Song"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("❓ Help"),
+			tgbotapi.NewKeyboardButton("✏ Help"),
 		),
 	)
 
@@ -595,4 +722,57 @@ func showSongsByCategory(bot *tgbotapi.BotAPI, message *tgbotapi.Message, collec
 	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Select a %s song:", category))
 	msg.ReplyMarkup = keyboard
 	bot.Send(msg)
+}
+
+func getRandomSong(bot *tgbotapi.BotAPI, message *tgbotapi.Message, collection *mongo.Collection) {
+	pipeline := []bson.M{{"$sample": bson.M{"size": 1}}}
+	cursor, err := collection.Aggregate(context.TODO(), pipeline)
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to get random song.")
+		bot.Send(msg)
+		return
+	}
+	defer cursor.Close(context.TODO())
+
+	var result bson.M
+	if cursor.Next(context.TODO()) {
+		if err := cursor.Decode(&result); err != nil {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Failed to process random song.")
+			bot.Send(msg)
+			return
+		}
+
+		// Safely get values with nil checks
+		title := ""
+		if t, ok := result["title"].(string); ok {
+			title = t
+		}
+
+		category := ""
+		if c, ok := result["category"].(string); ok {
+			category = c
+		}
+
+		lyrics := ""
+		if l, ok := result["lyrics"].(string); ok {
+			lyrics = l
+		}
+
+		// Send the image if it exists
+		if imageURL, ok := result["image"].(string); ok && imageURL != "" {
+			photoMsg := tgbotapi.NewPhotoShare(message.Chat.ID, imageURL)
+			bot.Send(photoMsg)
+		}
+
+		// Send song details
+		songInfo := fmt.Sprintf("Title: %s\nCategory: %s\n\nLyrics:\n%s",
+			title,
+			category,
+			lyrics)
+		msg := tgbotapi.NewMessage(message.Chat.ID, songInfo)
+		bot.Send(msg)
+	} else {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "No songs found in the database.")
+		bot.Send(msg)
+	}
 }
