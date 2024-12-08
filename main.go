@@ -44,6 +44,12 @@ func main() {
 	telegramBotToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	mongoDBURI := os.Getenv("MONGODB_URI")
 
+	// Get port from environment variable or use default
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080" // default port
+	}
+
 	// Connect to MongoDB
 	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(mongoDBURI))
 	if err != nil {
@@ -64,6 +70,17 @@ func main() {
 
 	bot.Debug = true
 	fmt.Printf("Authorized on account %s\n", bot.Self.UserName)
+
+	// Start HTTP server
+	go func() {
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "Bot is running!")
+		})
+		log.Printf("Starting server on port %s", port)
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			log.Fatal(err)
+		}
+	}()
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
